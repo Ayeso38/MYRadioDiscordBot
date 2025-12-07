@@ -1,0 +1,105 @@
+╔══════════════════════════════════════════════════════════════╗
+║        🔧 MISSING COMMANDS? QUICK FIX! 🔧                    ║
+╚══════════════════════════════════════════════════════════════╝
+
+❓ PROBLEM: Only see /stations command?
+
+Your bot has 3 commands but only 1 appears!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ QUICK FIX (30 seconds):
+
+1. Stop your bot (Ctrl+C)
+
+2. Rebuild:
+   > npm run build
+
+3. Start bot:
+   > npm start
+
+4. Check console output:
+   ✅ Loaded command: stations
+   ✅ Loaded command: stop          ← Should see this!
+   ✅ Loaded command: nowplaying    ← And this!
+   📄 Registering 3 command(s)...
+
+5. Wait 5-10 seconds (or 5-60 min if no GUILD_ID)
+
+6. Type / in Discord - all 3 commands appear!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚡ FASTER FIX - Use GUILD_ID:
+
+1. Get your Discord server ID:
+   - Right-click server icon
+   - Click "Copy Server ID"
+
+2. Add to .env file:
+   GUILD_ID=your_server_id_here
+
+3. Restart bot:
+   > npm start
+
+4. Commands appear in 5 SECONDS! ⚡
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📋 ALL YOUR BOT'S COMMANDS:
+
+/stations              - Browse radio stations
+/stations state:X      - Filter by state
+/stop                  - Stop and leave voice
+/nowplaying            - Show current station
+
+Plus buttons when playing:
+  ⏸️ Pause
+  ▶️ Resume
+  ⏹️ Stop
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔍 VERIFY COMMANDS LOADED:
+
+Check console when bot starts:
+
+Good ✅:
+  ✅ Loaded command: stations
+  ✅ Loaded command: stop
+  ✅ Loaded command: nowplaying
+  📄 Registering 3 command(s)...
+
+Bad ❌:
+  ✅ Loaded command: stations
+  📄 Registering 1 command(s)...
+  
+If bad → Run: npm run build
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+💡 WHY COMMANDS MISSING?
+
+Reason 1: Bot started before all commands compiled
+Fix: npm run build && npm start
+
+Reason 2: Global commands (slow sync)
+Fix: Add GUILD_ID to .env for instant testing
+
+Reason 3: Discord cache
+Fix: Restart Discord app
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✨ TL;DR:
+
+> npm run build
+> npm start
+
+Wait 5-60 min OR add GUILD_ID for instant commands!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📚 Full guide: MISSING_COMMANDS_FIX.md
+
+╚══════════════════════════════════════════════════════════════╝
