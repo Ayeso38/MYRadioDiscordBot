@@ -51,7 +51,7 @@ export const STATIONS: Station[] = [
     frequency: '97.6 FM',
     state: 'Kuala Lumpur',
     category: 'Music',
-    streamUrl: "https://n15.rcs.revma.com/drakdf8mtd3vv?rj-ttl=5&rj-tok=AAABms_reuEAkPLfHUhXRvX4vA",
+    streamUrl: "https://n05.rcs.revma.com/drakdf8mtd3vv?rj-ttl=5&rj-tok=AAABmvnwRdIAlsSJ3M2YY_hOjQ",
     logoColor: 'bg-purple-500',
     logo: "https://cdn.instant.audio/images/logos/radioonline-my/hot.png"
   },
