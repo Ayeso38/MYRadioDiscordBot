@@ -1,6 +1,6 @@
 # 🎙️ MY.Radio Discord Bot
 
-> **Version 0.10** | Stream Malaysian radio stations directly in Discord voice channels!
+> **Version 1.0.0** | Stream Malaysian radio stations directly in Discord voice channels!
 
 A feature-rich Discord bot that lets users browse and stream 17+ Malaysian radio stations from 9 states — all within Discord.
 
