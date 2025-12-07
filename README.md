@@ -200,7 +200,7 @@ npm run watch   # Watch mode for TypeScript
 
 ## 📄 License
 
-MIT License © 2024 Ayeso
+MIT License © 2025 Ayeso
 
 ---
 
