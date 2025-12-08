@@ -106,11 +106,11 @@ export class MusicPlayerManager {
       // Create audio stream using direct URL
       const stream = await this.createStream(station.streamUrl);
 
-      // Use Raw for HLS streams (FFmpeg outputs PCM), Arbitrary for regular streams
+      // Use OggOpus for HLS streams (FFmpeg outputs Opus), Arbitrary for regular streams
       const isHLS = this.isHLSStream(station.streamUrl);
       const resource = createAudioResource(stream, {
-        inputType: isHLS ? StreamType.Raw : StreamType.Arbitrary,
-        inlineVolume: true,
+        inputType: isHLS ? StreamType.OggOpus : StreamType.Arbitrary,
+        inlineVolume: !isHLS,  // Volume control not available for OggOpus
       });
 
       // Set volume to 50% to prevent distortion
@@ -265,7 +265,7 @@ export class MusicPlayerManager {
       console.log(`📍 FFmpeg path: ${ffmpegPath}`);
       console.log(`🔗 URL: ${url}`);
 
-      // FFmpeg arguments for HLS streaming - output raw PCM for maximum compatibility
+      // FFmpeg arguments for HLS streaming - output OGG/Opus (Discord native format)
       const ffmpegArgs = [
         // Logging - use info level to see more details
         '-loglevel', 'info',
@@ -279,14 +279,16 @@ export class MusicPlayerManager {
         // Input
         '-i', url,
 
-        // Audio processing - output raw PCM (most compatible)
+        // Audio processing - encode to Opus (Discord native)
         '-vn',                                // No video
-        '-acodec', 'pcm_s16le',               // Raw PCM 16-bit (universally supported)
-        '-ar', '48000',                       // 48kHz sample rate
+        '-c:a', 'libopus',                    // Opus codec
+        '-b:a', '128k',                       // 128kbps audio bitrate
+        '-ar', '48000',                       // 48kHz sample rate (Discord requirement)
         '-ac', '2',                           // Stereo
+        '-application', 'audio',              // Optimize for audio
 
         // Output format
-        '-f', 's16le',                        // Raw PCM format
+        '-f', 'ogg',                          // OGG container
         'pipe:1'                              // Output to stdout
       ];
 
