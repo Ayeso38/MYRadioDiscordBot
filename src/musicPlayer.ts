@@ -11,11 +11,40 @@ import {
 } from '@discordjs/voice';
 import { VoiceBasedChannel, EmbedBuilder } from 'discord.js';
 import { Station } from './types';
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, ChildProcess, execSync } from 'child_process';
 import * as path from 'path';
+import * as fs from 'fs';
 
-// Get FFmpeg path from ffmpeg-static
-const ffmpegPath = require('ffmpeg-static') as string;
+// Get FFmpeg path - try ffmpeg-static first, then fall back to system ffmpeg
+function getFFmpegPath(): string {
+  // Try ffmpeg-static first
+  try {
+    const staticPath = require('ffmpeg-static') as string;
+    if (staticPath && fs.existsSync(staticPath)) {
+      console.log(`✅ Using ffmpeg-static: ${staticPath}`);
+      return staticPath;
+    }
+  } catch (e) {
+    console.log('⚠️ ffmpeg-static not available, trying system ffmpeg...');
+  }
+
+  // Try system ffmpeg
+  try {
+    const result = execSync('which ffmpeg || where ffmpeg', { encoding: 'utf-8' }).trim();
+    if (result) {
+      console.log(`✅ Using system ffmpeg: ${result.split('\n')[0]}`);
+      return result.split('\n')[0];
+    }
+  } catch (e) {
+    // Ignore
+  }
+
+  // Fallback - just use 'ffmpeg' and hope it's in PATH
+  console.log('⚠️ Using ffmpeg from PATH');
+  return 'ffmpeg';
+}
+
+const ffmpegPath = getFFmpegPath();
 
 interface PlayerState {
   connection: VoiceConnection;
