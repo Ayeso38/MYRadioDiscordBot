@@ -12,8 +12,7 @@ import {
 } from '@discordjs/voice';
 import { VoiceBasedChannel, EmbedBuilder } from 'discord.js';
 import { Station } from './types';
-import { spawn, ChildProcess, execSync } from 'child_process';
-import * as path from 'path';
+import { spawn, execSync } from 'child_process';
 import * as fs from 'fs';
 
 // Log voice dependency report at startup
@@ -26,11 +25,10 @@ function getFFmpegPath(): string {
   const systemPaths = [
     '/usr/bin/ffmpeg',
     '/usr/local/bin/ffmpeg',
-    '/nix/store',  // Railway/Nixpacks installs here
   ];
 
   // Check standard system paths first
-  for (const sysPath of systemPaths.slice(0, 2)) {
+  for (const sysPath of systemPaths) {
     if (fs.existsSync(sysPath)) {
       console.log(`✅ Using system ffmpeg: ${sysPath}`);
       return sysPath;
@@ -67,7 +65,6 @@ function getFFmpegPath(): string {
   }
 
   // ONLY use ffmpeg-static for LOCAL development (Windows/Mac)
-  // It causes SIGSEGV on Railway's Linux environment
   if (process.platform !== 'linux') {
     try {
       const staticPath = require('ffmpeg-static') as string;
@@ -82,7 +79,7 @@ function getFFmpegPath(): string {
     console.log('⚠️ Skipping ffmpeg-static on Linux (causes SIGSEGV)');
   }
 
-  // Last resort - hope ffmpeg is in PATH
+  // Last resort
   console.log('⚠️ Using ffmpeg from PATH (last resort)');
   return 'ffmpeg';
 }
@@ -94,6 +91,7 @@ interface PlayerState {
   player: AudioPlayer;
   currentStation: Station | null;
   textChannelId: string;
+  ffmpegProcess?: any;  // Track FFmpeg process for cleanup
 }
 
 export class MusicPlayerManager {
@@ -122,11 +120,6 @@ export class MusicPlayerManager {
           console.log(`✅ Connected to voice channel in ${voiceChannel.guild.name}`);
         });
 
-        // Handle connection state changes for debugging
-        connection.on('stateChange', (oldState, newState) => {
-          console.log(`🔌 Voice connection: ${oldState.status} -> ${newState.status}`);
-        });
-
         // Handle disconnection
         connection.on(VoiceConnectionStatus.Disconnected, async () => {
           try {
@@ -153,7 +146,7 @@ export class MusicPlayerManager {
         const subscription = connection.subscribe(player);
         console.log(`🔗 Player subscribed to connection: ${subscription ? 'YES' : 'NO'}`);
 
-        // Wait for connection to be ready before continuing
+        // Wait for connection to be ready
         try {
           await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
           console.log(`✅ Voice connection is ready`);
@@ -161,17 +154,44 @@ export class MusicPlayerManager {
           console.error(`❌ Voice connection failed to become ready`);
           throw error;
         }
+      } else {
+        // Kill any existing FFmpeg process before starting new stream
+        if (playerState.ffmpegProcess) {
+          try {
+            playerState.ffmpegProcess.kill('SIGKILL');
+          } catch (e) {
+            // Ignore
+          }
+          playerState.ffmpegProcess = undefined;
+        }
       }
 
-      // Create audio stream using direct URL
-      const stream = await this.createStream(station.streamUrl);
+      // Check if this is an HLS stream
+      const isHLS = this.isHLSStream(station.streamUrl);
+      console.log(`📻 Stream type: ${isHLS ? 'HLS (m3u8)' : 'Direct (MP3/AAC)'}`);
 
-      // Use Arbitrary for all streams - let Discord.js auto-detect the format
-      // This works for both HLS (OGG/Opus from FFmpeg) and direct streams
-      const resource = createAudioResource(stream, {
-        inputType: StreamType.Arbitrary,
-        inlineVolume: true,
-      });
+      let resource;
+
+      if (isHLS) {
+        // HLS streams: Use FFmpeg with Raw PCM output
+        console.log(`🎬 Using FFmpeg for HLS stream`);
+        const { stream, ffmpegProcess } = await this.createHLSStream(station.streamUrl);
+        playerState.ffmpegProcess = ffmpegProcess;
+        
+        resource = createAudioResource(stream, {
+          inputType: StreamType.Raw,
+          inlineVolume: true,
+        });
+      } else {
+        // Direct streams: Pass through without FFmpeg (no lag!)
+        console.log(`📡 Using direct stream (no FFmpeg)`);
+        const stream = await this.createDirectStream(station.streamUrl);
+        
+        resource = createAudioResource(stream, {
+          inputType: StreamType.Arbitrary,
+          inlineVolume: true,
+        });
+      }
 
       // Set volume to 50% to prevent distortion
       if (resource.volume) {
@@ -185,26 +205,23 @@ export class MusicPlayerManager {
       // Play the resource
       playerState.player.play(resource);
 
-      // Handle player events
+      // Handle player events (remove old listeners first to prevent duplicates)
+      playerState.player.removeAllListeners();
+      
       playerState.player.on(AudioPlayerStatus.Playing, () => {
         console.log(`🎵 Now playing: ${station.name}`);
-        console.log(`🔊 Audio player state: Playing`);
       });
 
       playerState.player.on(AudioPlayerStatus.Buffering, () => {
-        console.log(`⏳ Audio player buffering...`);
+        console.log(`⏳ Buffering...`);
       });
 
       playerState.player.on(AudioPlayerStatus.Idle, () => {
-        console.log(`⏸️  Playback ended for: ${station.name}`);
-      });
-
-      playerState.player.on(AudioPlayerStatus.AutoPaused, () => {
-        console.log(`⚠️ Audio player auto-paused (no subscribers?)`);
+        console.log(`⏹️ Playback ended for: ${station.name}`);
       });
 
       playerState.player.on('error', (error) => {
-        console.error(`❌ Audio player error:`, error);
+        console.error(`❌ Audio player error:`, error.message);
       });
 
     } catch (error) {
@@ -218,6 +235,15 @@ export class MusicPlayerManager {
 
     if (!playerState) {
       return false;
+    }
+
+    // Kill FFmpeg process if running
+    if (playerState.ffmpegProcess) {
+      try {
+        playerState.ffmpegProcess.kill('SIGKILL');
+      } catch (e) {
+        // Ignore
+      }
     }
 
     playerState.player.stop();
@@ -260,14 +286,23 @@ export class MusicPlayerManager {
     return playerState.player.state.status === AudioPlayerStatus.Paused;
   }
 
-  private async createStream(url: string): Promise<any> {
-    // Check if this is an HLS stream
-    if (this.isHLSStream(url)) {
-      console.log(`🎬 Detected HLS stream, using FFmpeg: ${url.substring(0, 50)}...`);
-      return this.createHLSStream(url);
-    }
+  /**
+   * Detect if URL is an HLS/m3u8 stream
+   */
+  private isHLSStream(url: string): boolean {
+    const lowerUrl = url.toLowerCase();
+    if (lowerUrl.includes('.m3u8')) return true;
+    if (lowerUrl.includes('/hls/')) return true;
+    if (lowerUrl.includes('/playlist.m3u')) return true;
+    if (lowerUrl.includes('manifest(format=m3u8')) return true;
+    return false;
+  }
 
-    // Use direct HTTP/HTTPS streaming for regular streams
+  /**
+   * Create a direct HTTP stream for non-HLS sources (MP3, AAC, etc.)
+   * No FFmpeg = No lag!
+   */
+  private async createDirectStream(url: string): Promise<any> {
     const https = require('https');
     const http = require('http');
 
@@ -283,13 +318,13 @@ export class MusicPlayerManager {
         // Handle redirects
         if (response.statusCode === 301 || response.statusCode === 302) {
           const redirectUrl = response.headers.location;
-          console.log(`Following redirect to: ${redirectUrl}`);
-          this.createStream(redirectUrl).then(resolve).catch(reject);
+          console.log(`↪️ Following redirect to: ${redirectUrl.substring(0, 50)}...`);
+          this.createDirectStream(redirectUrl).then(resolve).catch(reject);
           return;
         }
 
         if (response.statusCode === 200) {
-          console.log(`✅ Stream connected: ${url.substring(0, 50)}...`);
+          console.log(`✅ Direct stream connected`);
           resolve(response);
         } else {
           reject(new Error(`HTTP ${response.statusCode}: ${response.statusMessage}`));
@@ -309,34 +344,16 @@ export class MusicPlayerManager {
   }
 
   /**
-   * Detect if URL is an HLS/m3u8 stream
-   */
-  private isHLSStream(url: string): boolean {
-    const lowerUrl = url.toLowerCase();
-
-    // Check for common HLS indicators
-    if (lowerUrl.includes('.m3u8')) return true;
-    if (lowerUrl.includes('/hls/')) return true;
-    if (lowerUrl.includes('/playlist.m3u')) return true;
-    if (lowerUrl.includes('manifest(format=m3u8')) return true;
-
-    return false;
-  }
-
-  /**
    * Create an audio stream from HLS/m3u8 URL using FFmpeg
-   * FFmpeg handles: HLS protocol, segment downloading, audio decoding
-   * Output: OGG/Opus - compact and Discord-native format (no lag!)
+   * Output: Raw PCM s16le (required for HLS to work)
    */
-  private createHLSStream(url: string): Promise<any> {
+  private createHLSStream(url: string): Promise<{ stream: any, ffmpegProcess: any }> {
     return new Promise((resolve, reject) => {
       console.log(`🎬 Starting FFmpeg HLS decoder`);
       console.log(`📍 FFmpeg path: ${ffmpegPath}`);
-      console.log(`🔗 URL: ${url}`);
 
-      // FFmpeg arguments for HLS streaming - output OGG/Opus (compact, no lag)
+      // FFmpeg arguments for HLS streaming - output Raw PCM
       const ffmpegArgs = [
-        // Logging
         '-loglevel', 'warning',
         '-hide_banner',
 
@@ -348,20 +365,16 @@ export class MusicPlayerManager {
         // Input
         '-i', url,
 
-        // Audio processing - encode to Opus in OGG container
-        '-vn',                                // No video
-        '-c:a', 'libopus',                    // Opus codec (Discord native)
-        '-b:a', '128k',                       // 128kbps bitrate
-        '-ar', '48000',                       // 48kHz sample rate (Discord requirement)
-        '-ac', '2',                           // Stereo
-        '-application', 'lowdelay',           // Low latency mode for streaming
+        // Audio processing - output raw PCM
+        '-vn',                      // No video
+        '-acodec', 'pcm_s16le',     // Raw PCM signed 16-bit little-endian
+        '-ar', '48000',             // 48kHz sample rate
+        '-ac', '2',                 // Stereo
 
         // Output format
-        '-f', 'ogg',                          // OGG container
-        'pipe:1'                              // Output to stdout
+        '-f', 's16le',              // Raw PCM format
+        'pipe:1'                    // Output to stdout
       ];
-
-      console.log(`📝 FFmpeg args: ${ffmpegArgs.join(' ')}`);
 
       const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
         stdio: ['pipe', 'pipe', 'pipe']
@@ -371,34 +384,30 @@ export class MusicPlayerManager {
       let hasData = false;
       let resolved = false;
 
-      // Log process info
       console.log(`🔄 FFmpeg PID: ${ffmpeg.pid}`);
 
-      // Capture all stderr output
       ffmpeg.stderr.on('data', (data: Buffer) => {
         const message = data.toString();
         errorOutput += message;
-
-        // Only log warnings/errors, not progress
-        if (message.includes('Warning') || message.includes('Error') || message.includes('error')) {
-          console.log(`[FFmpeg] ${message.trim().substring(0, 200)}`);
+        // Only log errors/warnings
+        if (message.toLowerCase().includes('error') || message.toLowerCase().includes('warning')) {
+          console.log(`[FFmpeg] ${message.trim().substring(0, 150)}`);
         }
       });
 
-      // Check when we get actual audio data
       ffmpeg.stdout.on('data', (chunk: Buffer) => {
         if (!hasData) {
           hasData = true;
-          console.log(`✅ HLS stream connected - receiving audio data (${chunk.length} bytes)`);
+          console.log(`✅ HLS stream connected - receiving audio data`);
           if (!resolved) {
             resolved = true;
-            resolve(ffmpeg.stdout);
+            resolve({ stream: ffmpeg.stdout, ffmpegProcess: ffmpeg });
           }
         }
       });
 
       ffmpeg.on('spawn', () => {
-        console.log(`✅ FFmpeg process spawned successfully`);
+        console.log(`✅ FFmpeg process spawned`);
       });
 
       ffmpeg.on('error', (error) => {
@@ -410,29 +419,29 @@ export class MusicPlayerManager {
       });
 
       ffmpeg.on('close', (code, signal) => {
-        console.log(`FFmpeg closed: code=${code}, signal=${signal}`);
+        if (code !== 0 && code !== null) {
+          console.log(`FFmpeg closed: code=${code}, signal=${signal}`);
+        }
         if (!hasData && !resolved) {
           console.error(`❌ FFmpeg failed - no audio received`);
-          console.error(`FFmpeg stderr:\n${errorOutput.slice(-1000)}`);
           resolved = true;
           reject(new Error(`FFmpeg exited: code=${code}, signal=${signal}`));
         }
       });
 
-      // Timeout - if no data after 20 seconds, reject
+      // Timeout
       setTimeout(() => {
         if (!hasData && !resolved) {
-          console.error('❌ FFmpeg timeout - no audio data received after 20s');
-          console.error(`FFmpeg stderr:\n${errorOutput}`);
+          console.error('❌ FFmpeg timeout - no audio data received');
           ffmpeg.kill('SIGKILL');
           resolved = true;
-          reject(new Error('HLS stream timeout - no audio data received'));
+          reject(new Error('HLS stream timeout'));
         }
       }, 20000);
     });
   }
 
-  // Create a nice player embed
+  // Create player embed
   createPlayerEmbed(station: Station, isPlaying: boolean = true): EmbedBuilder {
     const embed = new EmbedBuilder()
       .setColor(isPlaying ? '#00ff00' : '#ff0000')
