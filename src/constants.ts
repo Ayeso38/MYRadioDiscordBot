@@ -61,7 +61,7 @@ export const STATIONS: Station[] = [
     frequency: '103.3 FM',
     state: 'Kuala Lumpur',
     category: 'Music',
-    streamUrl: "https://n17a-eu.rcs.revma.com/crec9cmbv4uvv/23_11p2ghidfhj2d02/playlist.m3u8?rj-ttl=5&rj-tok=AAABlF2WiCgAJUPufokb6G0b3Q",
+    streamUrl: "https://n05.rcs.revma.com/gs7xxfmbv4uvv/5_1afc0sltzyu6s02/playlist.m3u8?rj-ttl=5&rj-tok=AAABjegTVCYA1vnEPcGzM7rmGQ",
     logoColor: 'bg-blue-500',
     logo: "https://media2.fishtank.my/stations/era/2025/era_square_updated.png"
   },
