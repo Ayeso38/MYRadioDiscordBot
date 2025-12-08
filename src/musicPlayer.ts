@@ -70,9 +70,9 @@ export class MusicPlayerManager {
       }
 
       // Create audio stream using FFmpeg for M3U8/HLS support
-      const stream = await this.createStream(station.streamUrl);
+      const stream = this.createStream(station.streamUrl);
       const resource = createAudioResource(stream, {
-        inputType: StreamType.Raw, // Changed to Raw for FFmpeg PCM output
+        inputType: StreamType.Arbitrary, // prism-media handles the format
         inlineVolume: true,
       });
 
@@ -154,52 +154,35 @@ export class MusicPlayerManager {
     return playerState.player.state.status === AudioPlayerStatus.Paused;
   }
 
-  private async createStream(url: string): Promise<any> {
-    // Use FFmpeg to transcode M3U8/HLS streams to raw PCM audio for Discord
-    const ffmpeg = require('ffmpeg-static');
-    const { spawn } = require('child_process');
+  private createStream(url: string): any {
+    // Use prism-media FFmpeg for proper audio transcoding
+    const prism = require('prism-media');
 
     console.log(`🎵 Creating FFmpeg stream for: ${url.substring(0, 60)}...`);
 
     // FFmpeg arguments for HLS/M3U8 stream transcoding
     const ffmpegArgs = [
-      '-reconnect', '1',              // Enable reconnection
-      '-reconnect_streamed', '1',     // Reconnect for streamed protocols
-      '-reconnect_delay_max', '5',    // Max delay between reconnection attempts
-      '-i', url,                       // Input URL
-      '-analyzeduration', '0',         // Don't analyze stream (faster start)
-      '-loglevel', '0',                // Suppress FFmpeg logs
-      '-f', 's16le',                   // Output format: signed 16-bit little-endian PCM
-      '-ar', '48000',                  // Audio sample rate: 48kHz (Discord standard)
-      '-ac', '2',                      // Audio channels: 2 (stereo)
-      'pipe:1'                         // Output to stdout
+      '-reconnect', '1',
+      '-reconnect_streamed', '1',
+      '-reconnect_delay_max', '5',
+      '-i', url,
+      '-analyzeduration', '0',
+      '-loglevel', '0',
+      '-f', 's16le',
+      '-ar', '48000',
+      '-ac', '2',
     ];
 
-    const ffmpegProcess = spawn(ffmpeg, ffmpegArgs, {
-      windowsHide: true,
+    const transcoder = new prism.FFmpeg({
+      args: ffmpegArgs,
     });
 
-    // Handle FFmpeg errors
-    ffmpegProcess.stderr.on('data', (data: Buffer) => {
-      // Only log critical errors, not warnings
-      const message = data.toString();
-      if (message.includes('error') || message.includes('Error')) {
-        console.error('FFmpeg error:', message);
-      }
-    });
-
-    ffmpegProcess.on('error', (error: any) => {
-      console.error('❌ FFmpeg process error:', error.message);
-    });
-
-    ffmpegProcess.on('close', (code: number) => {
-      if (code !== 0 && code !== null) {
-        console.error(`❌ FFmpeg exited with code ${code}`);
-      }
+    transcoder.on('error', (error: any) => {
+      console.error('❌ FFmpeg transcoder error:', error.message);
     });
 
     console.log('✅ FFmpeg stream started');
-    return ffmpegProcess.stdout;
+    return transcoder;
   }
 
   // Create a nice player embed
