@@ -11,6 +11,11 @@ import {
 } from '@discordjs/voice';
 import { VoiceBasedChannel, EmbedBuilder } from 'discord.js';
 import { Station } from './types';
+import { spawn, ChildProcess } from 'child_process';
+import * as path from 'path';
+
+// Get FFmpeg path from ffmpeg-static
+const ffmpegPath = require('ffmpeg-static') as string;
 
 interface PlayerState {
   connection: VoiceConnection;
@@ -71,9 +76,12 @@ export class MusicPlayerManager {
 
       // Create audio stream using direct URL
       const stream = await this.createStream(station.streamUrl);
+
+      // Use OggOpus for HLS streams (FFmpeg outputs Opus), Arbitrary for regular streams
+      const isHLS = this.isHLSStream(station.streamUrl);
       const resource = createAudioResource(stream, {
-        inputType: StreamType.Arbitrary,
-        inlineVolume: true,
+        inputType: isHLS ? StreamType.OggOpus : StreamType.Arbitrary,
+        inlineVolume: !isHLS, // Volume control not available for Ogg/Opus
       });
 
       // Set volume to 50% to prevent distortion
@@ -155,7 +163,13 @@ export class MusicPlayerManager {
   }
 
   private async createStream(url: string): Promise<any> {
-    // Use direct HTTP/HTTPS streaming
+    // Check if this is an HLS stream
+    if (this.isHLSStream(url)) {
+      console.log(`🎬 Detected HLS stream, using FFmpeg: ${url.substring(0, 50)}...`);
+      return this.createHLSStream(url);
+    }
+
+    // Use direct HTTP/HTTPS streaming for regular streams
     const https = require('https');
     const http = require('http');
 
@@ -193,6 +207,101 @@ export class MusicPlayerManager {
         request.destroy();
         reject(new Error('Connection timeout'));
       });
+    });
+  }
+
+  /**
+   * Detect if URL is an HLS/m3u8 stream
+   */
+  private isHLSStream(url: string): boolean {
+    const lowerUrl = url.toLowerCase();
+
+    // Check for common HLS indicators
+    if (lowerUrl.includes('.m3u8')) return true;
+    if (lowerUrl.includes('/hls/')) return true;
+    if (lowerUrl.includes('/playlist.m3u')) return true;
+    if (lowerUrl.includes('manifest(format=m3u8')) return true;
+
+    return false;
+  }
+
+  /**
+   * Create an audio stream from HLS/m3u8 URL using FFmpeg
+   * FFmpeg handles: HLS protocol, segment downloading, audio decoding
+   * Output: PCM audio stream compatible with Discord
+   */
+  private createHLSStream(url: string): Promise<any> {
+    return new Promise((resolve, reject) => {
+      console.log(`🎬 Starting FFmpeg HLS decoder for: ${url.substring(0, 60)}...`);
+
+      // FFmpeg arguments for HLS streaming
+      const ffmpegArgs = [
+        // Input options
+        '-reconnect', '1',                    // Enable reconnection on network errors
+        '-reconnect_streamed', '1',           // Also reconnect on streamed content
+        '-reconnect_delay_max', '5',          // Max 5 second delay between reconnects
+        '-timeout', '20000000',               // 20 second timeout (in microseconds)
+        '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+
+        // Input
+        '-i', url,
+
+        // Audio processing
+        '-vn',                                // No video output
+        '-acodec', 'libopus',                 // Encode to Opus (Discord native format)
+        '-ar', '48000',                       // 48kHz sample rate (Discord requirement)
+        '-ac', '2',                           // Stereo audio
+        '-b:a', '128k',                       // 128kbps bitrate
+        '-application', 'audio',              // Optimize for audio
+
+        // Output format
+        '-f', 'ogg',                          // Output format (Ogg container for Opus)
+        'pipe:1'                              // Output to stdout
+      ];
+
+      const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true
+      });
+
+      let started = false;
+      let errorOutput = '';
+
+      // Collect stderr for debugging
+      ffmpeg.stderr.on('data', (data: Buffer) => {
+        const message = data.toString();
+        errorOutput += message;
+
+        // Check if stream has started
+        if (!started && (message.includes('Opening') || message.includes('Stream #'))) {
+          console.log(`✅ HLS stream connected via FFmpeg`);
+          started = true;
+        }
+      });
+
+      ffmpeg.on('error', (error) => {
+        console.error('❌ FFmpeg process error:', error.message);
+        reject(error);
+      });
+
+      ffmpeg.on('close', (code) => {
+        if (code !== 0 && !started) {
+          console.error(`❌ FFmpeg exited with code ${code}`);
+          // Log last part of error output for debugging
+          const lastLines = errorOutput.split('\n').slice(-10).join('\n');
+          console.error('FFmpeg error output:', lastLines);
+        }
+      });
+
+      // Give FFmpeg a moment to start before resolving
+      // This ensures the stream is actually ready
+      setTimeout(() => {
+        if (ffmpeg.stdout && !ffmpeg.killed) {
+          resolve(ffmpeg.stdout);
+        } else {
+          reject(new Error('FFmpeg failed to start HLS stream'));
+        }
+      }, 500);
     });
   }
 
