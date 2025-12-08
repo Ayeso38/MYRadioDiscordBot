@@ -17,6 +17,8 @@ interface PlayerState {
   player: AudioPlayer;
   currentStation: Station | null;
   textChannelId: string;
+  voiceChannel: VoiceBasedChannel;
+  isReconnecting: boolean;
 }
 
 export class MusicPlayerManager {
@@ -63,47 +65,83 @@ export class MusicPlayerManager {
           player,
           currentStation: null,
           textChannelId,
+          voiceChannel,
+          isReconnecting: false,
         };
 
         this.players.set(guildId, playerState);
         connection.subscribe(player);
+
+        // Set up auto-reconnect on Idle (stream ended)
+        player.on(AudioPlayerStatus.Idle, () => {
+          const state = this.players.get(guildId);
+          if (state && state.currentStation && !state.isReconnecting) {
+            console.log(`🔄 Stream ended, auto-reconnecting to: ${state.currentStation.name}`);
+            this.reconnectStream(guildId);
+          }
+        });
+
+        // Set up error handling with auto-reconnect
+        player.on('error', (error) => {
+          console.error(`❌ Audio player error:`, error);
+          const state = this.players.get(guildId);
+          if (state && state.currentStation && !state.isReconnecting) {
+            console.log(`🔄 Error occurred, attempting to reconnect...`);
+            setTimeout(() => this.reconnectStream(guildId), 2000);
+          }
+        });
       }
 
-      // Create audio stream using FFmpeg for M3U8/HLS support
-      const stream = this.createStream(station.streamUrl);
-      const resource = createAudioResource(stream, {
-        inputType: StreamType.Arbitrary, // prism-media handles the format
-        inlineVolume: true,
-      });
-
-      // Set volume to 50% to prevent distortion
-      if (resource.volume) {
-        resource.volume.setVolume(0.5);
-      }
-
-      // Update state
-      playerState.currentStation = station;
-      playerState.textChannelId = textChannelId;
-
-      // Play the resource
-      playerState.player.play(resource);
-
-      // Handle player events
-      playerState.player.on(AudioPlayerStatus.Playing, () => {
-        console.log(`🎵 Now playing: ${station.name}`);
-      });
-
-      playerState.player.on(AudioPlayerStatus.Idle, () => {
-        console.log(`⏸️  Playback ended for: ${station.name}`);
-      });
-
-      playerState.player.on('error', (error) => {
-        console.error(`❌ Audio player error:`, error);
-      });
+      // Start playing the stream
+      this.startStream(playerState, station, textChannelId);
 
     } catch (error) {
       console.error('Error in play function:', error);
       throw error;
+    }
+  }
+
+  private startStream(playerState: PlayerState, station: Station, textChannelId: string): void {
+    // Create audio stream using FFmpeg for M3U8/HLS support
+    const stream = this.createStream(station.streamUrl);
+    const resource = createAudioResource(stream, {
+      inputType: StreamType.Arbitrary,
+      inlineVolume: true,
+    });
+
+    // Set volume to 50% to prevent distortion
+    if (resource.volume) {
+      resource.volume.setVolume(0.5);
+    }
+
+    // Update state
+    playerState.currentStation = station;
+    playerState.textChannelId = textChannelId;
+    playerState.isReconnecting = false;
+
+    // Play the resource
+    playerState.player.play(resource);
+    console.log(`🎵 Now playing: ${station.name}`);
+  }
+
+  private async reconnectStream(guildId: string): Promise<void> {
+    const playerState = this.players.get(guildId);
+    if (!playerState || !playerState.currentStation) return;
+
+    playerState.isReconnecting = true;
+    console.log(`🔄 Reconnecting to: ${playerState.currentStation.name}`);
+
+    try {
+      // Small delay before reconnecting
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      this.startStream(playerState, playerState.currentStation, playerState.textChannelId);
+    } catch (error) {
+      console.error('❌ Reconnection failed:', error);
+      playerState.isReconnecting = false;
+
+      // Retry after 5 seconds
+      setTimeout(() => this.reconnectStream(guildId), 5000);
     }
   }
 
@@ -114,6 +152,8 @@ export class MusicPlayerManager {
       return false;
     }
 
+    // Clear current station to prevent auto-reconnect
+    playerState.currentStation = null;
     playerState.player.stop();
     playerState.connection.destroy();
     this.players.delete(guildId);
