@@ -106,11 +106,11 @@ export class MusicPlayerManager {
       // Create audio stream using direct URL
       const stream = await this.createStream(station.streamUrl);
 
-      // Use OggOpus for HLS streams (FFmpeg outputs Opus), Arbitrary for regular streams
+      // Use Raw for HLS streams (FFmpeg outputs PCM), Arbitrary for regular streams
       const isHLS = this.isHLSStream(station.streamUrl);
       const resource = createAudioResource(stream, {
-        inputType: isHLS ? StreamType.OggOpus : StreamType.Arbitrary,
-        inlineVolume: !isHLS, // Volume control not available for Ogg/Opus
+        inputType: isHLS ? StreamType.Raw : StreamType.Arbitrary,
+        inlineVolume: true,
       });
 
       // Set volume to 50% to prevent distortion
@@ -257,69 +257,66 @@ export class MusicPlayerManager {
   /**
    * Create an audio stream from HLS/m3u8 URL using FFmpeg
    * FFmpeg handles: HLS protocol, segment downloading, audio decoding
-   * Output: Ogg/Opus audio stream compatible with Discord
+   * Output: Raw PCM audio stream for Discord to encode
    */
   private createHLSStream(url: string): Promise<any> {
     return new Promise((resolve, reject) => {
-      console.log(`🎬 Starting FFmpeg HLS decoder for: ${url}`);
+      console.log(`🎬 Starting FFmpeg HLS decoder`);
+      console.log(`📍 FFmpeg path: ${ffmpegPath}`);
+      console.log(`🔗 URL: ${url}`);
 
-      // FFmpeg arguments for HLS streaming
+      // FFmpeg arguments for HLS streaming - output raw PCM for maximum compatibility
       const ffmpegArgs = [
-        // Logging
-        '-loglevel', 'warning',               // Show warnings and errors
-        '-hide_banner',                       // Hide the banner
+        // Logging - use info level to see more details
+        '-loglevel', 'info',
+        '-hide_banner',
 
         // Input options for network streams
-        '-reconnect', '1',                    // Enable reconnection on network errors
-        '-reconnect_streamed', '1',           // Also reconnect on streamed content  
-        '-reconnect_delay_max', '5',          // Max 5 second delay between reconnects
-        '-timeout', '20000000',               // 20 second timeout (in microseconds)
-        '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        '-reconnect', '1',
+        '-reconnect_streamed', '1',
+        '-reconnect_delay_max', '5',
 
         // Input
         '-i', url,
 
-        // Audio processing
-        '-vn',                                // No video output
-        '-acodec', 'libopus',                 // Encode to Opus (Discord native format)
-        '-ar', '48000',                       // 48kHz sample rate (Discord requirement)
-        '-ac', '2',                           // Stereo audio
-        '-b:a', '128k',                       // 128kbps bitrate
-        '-application', 'audio',              // Optimize for audio
+        // Audio processing - output raw PCM (most compatible)
+        '-vn',                                // No video
+        '-acodec', 'pcm_s16le',               // Raw PCM 16-bit (universally supported)
+        '-ar', '48000',                       // 48kHz sample rate
+        '-ac', '2',                           // Stereo
 
         // Output format
-        '-f', 'ogg',                          // Output format (Ogg container for Opus)
+        '-f', 's16le',                        // Raw PCM format
         'pipe:1'                              // Output to stdout
       ];
 
-      console.log(`📝 FFmpeg command: ffmpeg ${ffmpegArgs.join(' ').substring(0, 100)}...`);
+      console.log(`📝 FFmpeg args: ${ffmpegArgs.slice(0, 10).join(' ')}...`);
 
       const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-        windowsVerbatimArguments: true  // Don't escape arguments on Windows
+        stdio: ['pipe', 'pipe', 'pipe']
       });
 
       let errorOutput = '';
       let hasData = false;
       let resolved = false;
 
-      // Collect stderr for debugging
+      // Log process info
+      console.log(`🔄 FFmpeg PID: ${ffmpeg.pid}`);
+
+      // Capture all stderr output
       ffmpeg.stderr.on('data', (data: Buffer) => {
         const message = data.toString();
         errorOutput += message;
 
-        // Log FFmpeg messages for debugging
-        if (message.includes('Error') || message.includes('error')) {
-          console.error(`❌ FFmpeg: ${message.trim()}`);
-        }
+        // Log everything for debugging
+        console.log(`[FFmpeg] ${message.trim().substring(0, 200)}`);
       });
 
       // Check when we get actual audio data
-      ffmpeg.stdout.on('data', () => {
+      ffmpeg.stdout.on('data', (chunk: Buffer) => {
         if (!hasData) {
           hasData = true;
-          console.log(`✅ HLS stream connected - receiving audio data`);
+          console.log(`✅ HLS stream connected - receiving audio data (${chunk.length} bytes)`);
           if (!resolved) {
             resolved = true;
             resolve(ffmpeg.stdout);
@@ -327,37 +324,38 @@ export class MusicPlayerManager {
         }
       });
 
+      ffmpeg.on('spawn', () => {
+        console.log(`✅ FFmpeg process spawned successfully`);
+      });
+
       ffmpeg.on('error', (error) => {
-        console.error('❌ FFmpeg process error:', error.message);
+        console.error('❌ FFmpeg spawn error:', error.message);
         if (!resolved) {
           resolved = true;
           reject(error);
         }
       });
 
-      ffmpeg.on('close', (code) => {
-        if (code !== 0 && !hasData) {
-          console.error(`❌ FFmpeg exited with code ${code}`);
-          // Log error output for debugging
-          if (errorOutput) {
-            console.error('FFmpeg error output:', errorOutput.slice(-500));
-          }
-          if (!resolved) {
-            resolved = true;
-            reject(new Error(`FFmpeg exited with code ${code}. Check if URL is valid.`));
-          }
+      ffmpeg.on('close', (code, signal) => {
+        console.log(`FFmpeg closed: code=${code}, signal=${signal}`);
+        if (!hasData && !resolved) {
+          console.error(`❌ FFmpeg failed - no audio received`);
+          console.error(`FFmpeg stderr:\n${errorOutput.slice(-1000)}`);
+          resolved = true;
+          reject(new Error(`FFmpeg exited: code=${code}, signal=${signal}`));
         }
       });
 
-      // Timeout - if no data after 15 seconds, reject
+      // Timeout - if no data after 20 seconds, reject
       setTimeout(() => {
         if (!hasData && !resolved) {
-          console.error('❌ FFmpeg timeout - no audio data received');
-          ffmpeg.kill('SIGTERM');
+          console.error('❌ FFmpeg timeout - no audio data received after 20s');
+          console.error(`FFmpeg stderr:\n${errorOutput}`);
+          ffmpeg.kill('SIGKILL');
           resolved = true;
           reject(new Error('HLS stream timeout - no audio data received'));
         }
-      }, 15000);
+      }, 20000);
     });
   }
 
