@@ -228,17 +228,21 @@ export class MusicPlayerManager {
   /**
    * Create an audio stream from HLS/m3u8 URL using FFmpeg
    * FFmpeg handles: HLS protocol, segment downloading, audio decoding
-   * Output: PCM audio stream compatible with Discord
+   * Output: Ogg/Opus audio stream compatible with Discord
    */
   private createHLSStream(url: string): Promise<any> {
     return new Promise((resolve, reject) => {
-      console.log(`🎬 Starting FFmpeg HLS decoder for: ${url.substring(0, 60)}...`);
+      console.log(`🎬 Starting FFmpeg HLS decoder for: ${url}`);
 
       // FFmpeg arguments for HLS streaming
       const ffmpegArgs = [
-        // Input options
+        // Logging
+        '-loglevel', 'warning',               // Show warnings and errors
+        '-hide_banner',                       // Hide the banner
+
+        // Input options for network streams
         '-reconnect', '1',                    // Enable reconnection on network errors
-        '-reconnect_streamed', '1',           // Also reconnect on streamed content
+        '-reconnect_streamed', '1',           // Also reconnect on streamed content  
         '-reconnect_delay_max', '5',          // Max 5 second delay between reconnects
         '-timeout', '20000000',               // 20 second timeout (in microseconds)
         '-user_agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -259,49 +263,72 @@ export class MusicPlayerManager {
         'pipe:1'                              // Output to stdout
       ];
 
+      console.log(`📝 FFmpeg command: ffmpeg ${ffmpegArgs.join(' ').substring(0, 100)}...`);
+
       const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
         stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true
+        windowsHide: true,
+        windowsVerbatimArguments: true  // Don't escape arguments on Windows
       });
 
-      let started = false;
       let errorOutput = '';
+      let hasData = false;
+      let resolved = false;
 
       // Collect stderr for debugging
       ffmpeg.stderr.on('data', (data: Buffer) => {
         const message = data.toString();
         errorOutput += message;
 
-        // Check if stream has started
-        if (!started && (message.includes('Opening') || message.includes('Stream #'))) {
-          console.log(`✅ HLS stream connected via FFmpeg`);
-          started = true;
+        // Log FFmpeg messages for debugging
+        if (message.includes('Error') || message.includes('error')) {
+          console.error(`❌ FFmpeg: ${message.trim()}`);
+        }
+      });
+
+      // Check when we get actual audio data
+      ffmpeg.stdout.on('data', () => {
+        if (!hasData) {
+          hasData = true;
+          console.log(`✅ HLS stream connected - receiving audio data`);
+          if (!resolved) {
+            resolved = true;
+            resolve(ffmpeg.stdout);
+          }
         }
       });
 
       ffmpeg.on('error', (error) => {
         console.error('❌ FFmpeg process error:', error.message);
-        reject(error);
+        if (!resolved) {
+          resolved = true;
+          reject(error);
+        }
       });
 
       ffmpeg.on('close', (code) => {
-        if (code !== 0 && !started) {
+        if (code !== 0 && !hasData) {
           console.error(`❌ FFmpeg exited with code ${code}`);
-          // Log last part of error output for debugging
-          const lastLines = errorOutput.split('\n').slice(-10).join('\n');
-          console.error('FFmpeg error output:', lastLines);
+          // Log error output for debugging
+          if (errorOutput) {
+            console.error('FFmpeg error output:', errorOutput.slice(-500));
+          }
+          if (!resolved) {
+            resolved = true;
+            reject(new Error(`FFmpeg exited with code ${code}. Check if URL is valid.`));
+          }
         }
       });
 
-      // Give FFmpeg a moment to start before resolving
-      // This ensures the stream is actually ready
+      // Timeout - if no data after 15 seconds, reject
       setTimeout(() => {
-        if (ffmpeg.stdout && !ffmpeg.killed) {
-          resolve(ffmpeg.stdout);
-        } else {
-          reject(new Error('FFmpeg failed to start HLS stream'));
+        if (!hasData && !resolved) {
+          console.error('❌ FFmpeg timeout - no audio data received');
+          ffmpeg.kill('SIGTERM');
+          resolved = true;
+          reject(new Error('HLS stream timeout - no audio data received'));
         }
-      }, 500);
+      }, 15000);
     });
   }
 
