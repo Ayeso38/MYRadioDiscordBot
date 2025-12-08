@@ -15,32 +15,70 @@ import { spawn, ChildProcess, execSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 
-// Get FFmpeg path - try ffmpeg-static first, then fall back to system ffmpeg
+// Get FFmpeg path - MUST use system ffmpeg on Railway to avoid SIGSEGV
 function getFFmpegPath(): string {
-  // Try ffmpeg-static first
-  try {
-    const staticPath = require('ffmpeg-static') as string;
-    if (staticPath && fs.existsSync(staticPath)) {
-      console.log(`✅ Using ffmpeg-static: ${staticPath}`);
-      return staticPath;
+  // Check for system FFmpeg in standard locations FIRST
+  const systemPaths = [
+    '/usr/bin/ffmpeg',
+    '/usr/local/bin/ffmpeg',
+    '/nix/store',  // Railway/Nixpacks installs here
+  ];
+
+  // Check standard system paths first
+  for (const sysPath of systemPaths.slice(0, 2)) {
+    if (fs.existsSync(sysPath)) {
+      console.log(`✅ Using system ffmpeg: ${sysPath}`);
+      return sysPath;
     }
-  } catch (e) {
-    console.log('⚠️ ffmpeg-static not available, trying system ffmpeg...');
   }
 
-  // Try system ffmpeg
+  // Check Nix store (Railway uses Nixpacks)
   try {
-    const result = execSync('which ffmpeg || where ffmpeg', { encoding: 'utf-8' }).trim();
-    if (result) {
-      console.log(`✅ Using system ffmpeg: ${result.split('\n')[0]}`);
-      return result.split('\n')[0];
+    const result = execSync('which ffmpeg 2>/dev/null', { encoding: 'utf-8' }).trim();
+    // Only use if it's NOT from node_modules (ffmpeg-static causes SIGSEGV)
+    if (result && !result.includes('node_modules')) {
+      console.log(`✅ Using system ffmpeg: ${result}`);
+      return result;
     }
   } catch (e) {
     // Ignore
   }
 
-  // Fallback - just use 'ffmpeg' and hope it's in PATH
-  console.log('⚠️ Using ffmpeg from PATH');
+  // Try finding ffmpeg in nix store directly
+  try {
+    const nixResult = execSync('find /nix/store -name "ffmpeg" -type f -executable 2>/dev/null | head -1', { encoding: 'utf-8' }).trim();
+    if (nixResult && fs.existsSync(nixResult)) {
+      console.log(`✅ Using Nix ffmpeg: ${nixResult}`);
+      return nixResult;
+    }
+  } catch (e) {
+    // Ignore
+  }
+
+  // Environment variable override (useful for debugging)
+  if (process.env.FFMPEG_PATH && fs.existsSync(process.env.FFMPEG_PATH)) {
+    console.log(`✅ Using FFMPEG_PATH env: ${process.env.FFMPEG_PATH}`);
+    return process.env.FFMPEG_PATH;
+  }
+
+  // ONLY use ffmpeg-static for LOCAL development (Windows/Mac)
+  // It causes SIGSEGV on Railway's Linux environment
+  if (process.platform !== 'linux') {
+    try {
+      const staticPath = require('ffmpeg-static') as string;
+      if (staticPath && fs.existsSync(staticPath)) {
+        console.log(`⚠️ Using ffmpeg-static (local dev): ${staticPath}`);
+        return staticPath;
+      }
+    } catch (e) {
+      console.log('⚠️ ffmpeg-static not available');
+    }
+  } else {
+    console.log('⚠️ Skipping ffmpeg-static on Linux (causes SIGSEGV)');
+  }
+
+  // Last resort - hope ffmpeg is in PATH
+  console.log('⚠️ Using ffmpeg from PATH (last resort)');
   return 'ffmpeg';
 }
 
