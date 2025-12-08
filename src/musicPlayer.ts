@@ -24,7 +24,7 @@ export class MusicPlayerManager {
 
   async play(voiceChannel: VoiceBasedChannel, station: Station, textChannelId: string): Promise<void> {
     const guildId = voiceChannel.guild.id;
-    
+
     try {
       // Get or create connection
       let playerState = this.players.get(guildId);
@@ -69,10 +69,10 @@ export class MusicPlayerManager {
         connection.subscribe(player);
       }
 
-      // Create audio stream using direct URL
+      // Create audio stream using FFmpeg for M3U8/HLS support
       const stream = await this.createStream(station.streamUrl);
       const resource = createAudioResource(stream, {
-        inputType: StreamType.Arbitrary,
+        inputType: StreamType.Raw, // Changed to Raw for FFmpeg PCM output
         inlineVolume: true,
       });
 
@@ -109,7 +109,7 @@ export class MusicPlayerManager {
 
   async stop(guildId: string): Promise<boolean> {
     const playerState = this.players.get(guildId);
-    
+
     if (!playerState) {
       return false;
     }
@@ -117,7 +117,7 @@ export class MusicPlayerManager {
     playerState.player.stop();
     playerState.connection.destroy();
     this.players.delete(guildId);
-    
+
     return true;
   }
 
@@ -155,45 +155,51 @@ export class MusicPlayerManager {
   }
 
   private async createStream(url: string): Promise<any> {
-    // Use direct HTTP/HTTPS streaming
-    const https = require('https');
-    const http = require('http');
-    
-    return new Promise((resolve, reject) => {
-      const protocol = url.startsWith('https') ? https : http;
-      
-      const request = protocol.get(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept': '*/*',
-        }
-      }, (response: any) => {
-        // Handle redirects
-        if (response.statusCode === 301 || response.statusCode === 302) {
-          const redirectUrl = response.headers.location;
-          console.log(`Following redirect to: ${redirectUrl}`);
-          this.createStream(redirectUrl).then(resolve).catch(reject);
-          return;
-        }
-        
-        if (response.statusCode === 200) {
-          console.log(`✅ Stream connected: ${url.substring(0, 50)}...`);
-          resolve(response);
-        } else {
-          reject(new Error(`HTTP ${response.statusCode}: ${response.statusMessage}`));
-        }
-      });
-      
-      request.on('error', (error: any) => {
-        console.error('Stream error:', error.message);
-        reject(error);
-      });
-      
-      request.setTimeout(10000, () => {
-        request.destroy();
-        reject(new Error('Connection timeout'));
-      });
+    // Use FFmpeg to transcode M3U8/HLS streams to raw PCM audio for Discord
+    const ffmpeg = require('ffmpeg-static');
+    const { spawn } = require('child_process');
+
+    console.log(`🎵 Creating FFmpeg stream for: ${url.substring(0, 60)}...`);
+
+    // FFmpeg arguments for HLS/M3U8 stream transcoding
+    const ffmpegArgs = [
+      '-reconnect', '1',              // Enable reconnection
+      '-reconnect_streamed', '1',     // Reconnect for streamed protocols
+      '-reconnect_delay_max', '5',    // Max delay between reconnection attempts
+      '-i', url,                       // Input URL
+      '-analyzeduration', '0',         // Don't analyze stream (faster start)
+      '-loglevel', '0',                // Suppress FFmpeg logs
+      '-f', 's16le',                   // Output format: signed 16-bit little-endian PCM
+      '-ar', '48000',                  // Audio sample rate: 48kHz (Discord standard)
+      '-ac', '2',                      // Audio channels: 2 (stereo)
+      'pipe:1'                         // Output to stdout
+    ];
+
+    const ffmpegProcess = spawn(ffmpeg, ffmpegArgs, {
+      windowsHide: true,
     });
+
+    // Handle FFmpeg errors
+    ffmpegProcess.stderr.on('data', (data: Buffer) => {
+      // Only log critical errors, not warnings
+      const message = data.toString();
+      if (message.includes('error') || message.includes('Error')) {
+        console.error('FFmpeg error:', message);
+      }
+    });
+
+    ffmpegProcess.on('error', (error: any) => {
+      console.error('❌ FFmpeg process error:', error.message);
+    });
+
+    ffmpegProcess.on('close', (code: number) => {
+      if (code !== 0 && code !== null) {
+        console.error(`❌ FFmpeg exited with code ${code}`);
+      }
+    });
+
+    console.log('✅ FFmpeg stream started');
+    return ffmpegProcess.stdout;
   }
 
   // Create a nice player embed
