@@ -17,8 +17,6 @@ interface PlayerState {
   player: AudioPlayer;
   currentStation: Station | null;
   textChannelId: string;
-  voiceChannel: VoiceBasedChannel;
-  isReconnecting: boolean;
 }
 
 export class MusicPlayerManager {
@@ -65,83 +63,47 @@ export class MusicPlayerManager {
           player,
           currentStation: null,
           textChannelId,
-          voiceChannel,
-          isReconnecting: false,
         };
 
         this.players.set(guildId, playerState);
         connection.subscribe(player);
-
-        // Set up auto-reconnect on Idle (stream ended)
-        player.on(AudioPlayerStatus.Idle, () => {
-          const state = this.players.get(guildId);
-          if (state && state.currentStation && !state.isReconnecting) {
-            console.log(`🔄 Stream ended, auto-reconnecting to: ${state.currentStation.name}`);
-            this.reconnectStream(guildId);
-          }
-        });
-
-        // Set up error handling with auto-reconnect
-        player.on('error', (error) => {
-          console.error(`❌ Audio player error:`, error);
-          const state = this.players.get(guildId);
-          if (state && state.currentStation && !state.isReconnecting) {
-            console.log(`🔄 Error occurred, attempting to reconnect...`);
-            setTimeout(() => this.reconnectStream(guildId), 2000);
-          }
-        });
       }
 
-      // Start playing the stream
-      this.startStream(playerState, station, textChannelId);
+      // Create audio stream using direct URL
+      const stream = await this.createStream(station.streamUrl);
+      const resource = createAudioResource(stream, {
+        inputType: StreamType.Arbitrary,
+        inlineVolume: true,
+      });
+
+      // Set volume to 50% to prevent distortion
+      if (resource.volume) {
+        resource.volume.setVolume(0.5);
+      }
+
+      // Update state
+      playerState.currentStation = station;
+      playerState.textChannelId = textChannelId;
+
+      // Play the resource
+      playerState.player.play(resource);
+
+      // Handle player events
+      playerState.player.on(AudioPlayerStatus.Playing, () => {
+        console.log(`🎵 Now playing: ${station.name}`);
+      });
+
+      playerState.player.on(AudioPlayerStatus.Idle, () => {
+        console.log(`⏸️  Playback ended for: ${station.name}`);
+      });
+
+      playerState.player.on('error', (error) => {
+        console.error(`❌ Audio player error:`, error);
+      });
 
     } catch (error) {
       console.error('Error in play function:', error);
       throw error;
-    }
-  }
-
-  private startStream(playerState: PlayerState, station: Station, textChannelId: string): void {
-    // Create audio stream using FFmpeg for M3U8/HLS support
-    const stream = this.createStream(station.streamUrl);
-    const resource = createAudioResource(stream, {
-      inputType: StreamType.Arbitrary,
-      inlineVolume: true,
-    });
-
-    // Set volume to 50% to prevent distortion
-    if (resource.volume) {
-      resource.volume.setVolume(0.5);
-    }
-
-    // Update state
-    playerState.currentStation = station;
-    playerState.textChannelId = textChannelId;
-    playerState.isReconnecting = false;
-
-    // Play the resource
-    playerState.player.play(resource);
-    console.log(`🎵 Now playing: ${station.name}`);
-  }
-
-  private async reconnectStream(guildId: string): Promise<void> {
-    const playerState = this.players.get(guildId);
-    if (!playerState || !playerState.currentStation) return;
-
-    playerState.isReconnecting = true;
-    console.log(`🔄 Reconnecting to: ${playerState.currentStation.name}`);
-
-    try {
-      // Small delay before reconnecting
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
-      this.startStream(playerState, playerState.currentStation, playerState.textChannelId);
-    } catch (error) {
-      console.error('❌ Reconnection failed:', error);
-      playerState.isReconnecting = false;
-
-      // Retry after 5 seconds
-      setTimeout(() => this.reconnectStream(guildId), 5000);
     }
   }
 
@@ -152,8 +114,6 @@ export class MusicPlayerManager {
       return false;
     }
 
-    // Clear current station to prevent auto-reconnect
-    playerState.currentStation = null;
     playerState.player.stop();
     playerState.connection.destroy();
     this.players.delete(guildId);
@@ -194,35 +154,46 @@ export class MusicPlayerManager {
     return playerState.player.state.status === AudioPlayerStatus.Paused;
   }
 
-  private createStream(url: string): any {
-    // Use prism-media FFmpeg for proper audio transcoding
-    const prism = require('prism-media');
+  private async createStream(url: string): Promise<any> {
+    // Use direct HTTP/HTTPS streaming
+    const https = require('https');
+    const http = require('http');
 
-    console.log(`🎵 Creating FFmpeg stream for: ${url.substring(0, 60)}...`);
+    return new Promise((resolve, reject) => {
+      const protocol = url.startsWith('https') ? https : http;
 
-    // FFmpeg arguments for HLS/M3U8 stream transcoding
-    const ffmpegArgs = [
-      '-reconnect', '1',
-      '-reconnect_streamed', '1',
-      '-reconnect_delay_max', '5',
-      '-i', url,
-      '-analyzeduration', '0',
-      '-loglevel', '0',
-      '-f', 's16le',
-      '-ar', '48000',
-      '-ac', '2',
-    ];
+      const request = protocol.get(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': '*/*',
+        }
+      }, (response: any) => {
+        // Handle redirects
+        if (response.statusCode === 301 || response.statusCode === 302) {
+          const redirectUrl = response.headers.location;
+          console.log(`Following redirect to: ${redirectUrl}`);
+          this.createStream(redirectUrl).then(resolve).catch(reject);
+          return;
+        }
 
-    const transcoder = new prism.FFmpeg({
-      args: ffmpegArgs,
+        if (response.statusCode === 200) {
+          console.log(`✅ Stream connected: ${url.substring(0, 50)}...`);
+          resolve(response);
+        } else {
+          reject(new Error(`HTTP ${response.statusCode}: ${response.statusMessage}`));
+        }
+      });
+
+      request.on('error', (error: any) => {
+        console.error('Stream error:', error.message);
+        reject(error);
+      });
+
+      request.setTimeout(10000, () => {
+        request.destroy();
+        reject(new Error('Connection timeout'));
+      });
     });
-
-    transcoder.on('error', (error: any) => {
-      console.error('❌ FFmpeg transcoder error:', error.message);
-    });
-
-    console.log('✅ FFmpeg stream started');
-    return transcoder;
   }
 
   // Create a nice player embed
