@@ -1,0 +1,5 @@
+# Railway Nixpacks configuration
+# Ensures FFmpeg is available for HLS streaming
+
+[phases.setup]
+nixPkgs = ["ffmpeg", "nodejs_20"]
