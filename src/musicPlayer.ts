@@ -166,11 +166,10 @@ export class MusicPlayerManager {
       // Create audio stream using direct URL
       const stream = await this.createStream(station.streamUrl);
 
-      // For HLS streams, FFmpeg outputs raw PCM s16le
-      // For regular streams, use Arbitrary
-      const isHLS = this.isHLSStream(station.streamUrl);
+      // Use Arbitrary for all streams - let Discord.js auto-detect the format
+      // This works for both HLS (OGG/Opus from FFmpeg) and direct streams
       const resource = createAudioResource(stream, {
-        inputType: isHLS ? StreamType.Raw : StreamType.Arbitrary,
+        inputType: StreamType.Arbitrary,
         inlineVolume: true,
       });
 
@@ -327,7 +326,7 @@ export class MusicPlayerManager {
   /**
    * Create an audio stream from HLS/m3u8 URL using FFmpeg
    * FFmpeg handles: HLS protocol, segment downloading, audio decoding
-   * Output: Raw PCM audio stream for Discord to encode
+   * Output: OGG/Opus - compact and Discord-native format (no lag!)
    */
   private createHLSStream(url: string): Promise<any> {
     return new Promise((resolve, reject) => {
@@ -335,8 +334,7 @@ export class MusicPlayerManager {
       console.log(`📍 FFmpeg path: ${ffmpegPath}`);
       console.log(`🔗 URL: ${url}`);
 
-      // FFmpeg arguments for HLS streaming - output raw PCM s16le
-      // Discord.js voice will encode this to Opus
+      // FFmpeg arguments for HLS streaming - output OGG/Opus (compact, no lag)
       const ffmpegArgs = [
         // Logging
         '-loglevel', 'warning',
@@ -350,14 +348,16 @@ export class MusicPlayerManager {
         // Input
         '-i', url,
 
-        // Audio processing - output raw PCM
+        // Audio processing - encode to Opus in OGG container
         '-vn',                                // No video
-        '-acodec', 'pcm_s16le',               // Raw PCM signed 16-bit little-endian
+        '-c:a', 'libopus',                    // Opus codec (Discord native)
+        '-b:a', '128k',                       // 128kbps bitrate
         '-ar', '48000',                       // 48kHz sample rate (Discord requirement)
         '-ac', '2',                           // Stereo
+        '-application', 'lowdelay',           // Low latency mode for streaming
 
         // Output format
-        '-f', 's16le',                        // Raw PCM format
+        '-f', 'ogg',                          // OGG container
         'pipe:1'                              // Output to stdout
       ];
 
@@ -379,8 +379,10 @@ export class MusicPlayerManager {
         const message = data.toString();
         errorOutput += message;
 
-        // Log everything for debugging
-        console.log(`[FFmpeg] ${message.trim().substring(0, 200)}`);
+        // Only log warnings/errors, not progress
+        if (message.includes('Warning') || message.includes('Error') || message.includes('error')) {
+          console.log(`[FFmpeg] ${message.trim().substring(0, 200)}`);
+        }
       });
 
       // Check when we get actual audio data
