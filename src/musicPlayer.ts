@@ -7,13 +7,18 @@ import {
   entersState,
   AudioPlayer,
   VoiceConnection,
-  StreamType
+  StreamType,
+  generateDependencyReport
 } from '@discordjs/voice';
 import { VoiceBasedChannel, EmbedBuilder } from 'discord.js';
 import { Station } from './types';
 import { spawn, ChildProcess, execSync } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
+
+// Log voice dependency report at startup
+console.log('🔧 Voice Dependencies Report:');
+console.log(generateDependencyReport());
 
 // Get FFmpeg path - MUST use system ffmpeg on Railway to avoid SIGSEGV
 function getFFmpegPath(): string {
@@ -117,6 +122,11 @@ export class MusicPlayerManager {
           console.log(`✅ Connected to voice channel in ${voiceChannel.guild.name}`);
         });
 
+        // Handle connection state changes for debugging
+        connection.on('stateChange', (oldState, newState) => {
+          console.log(`🔌 Voice connection: ${oldState.status} -> ${newState.status}`);
+        });
+
         // Handle disconnection
         connection.on(VoiceConnectionStatus.Disconnected, async () => {
           try {
@@ -138,17 +148,30 @@ export class MusicPlayerManager {
         };
 
         this.players.set(guildId, playerState);
-        connection.subscribe(player);
+        
+        // Subscribe player to connection
+        const subscription = connection.subscribe(player);
+        console.log(`🔗 Player subscribed to connection: ${subscription ? 'YES' : 'NO'}`);
+
+        // Wait for connection to be ready before continuing
+        try {
+          await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
+          console.log(`✅ Voice connection is ready`);
+        } catch (error) {
+          console.error(`❌ Voice connection failed to become ready`);
+          throw error;
+        }
       }
 
       // Create audio stream using direct URL
       const stream = await this.createStream(station.streamUrl);
 
-      // Use OggOpus for HLS streams (FFmpeg outputs Opus), Arbitrary for regular streams
+      // For HLS streams, FFmpeg outputs raw PCM s16le
+      // For regular streams, use Arbitrary
       const isHLS = this.isHLSStream(station.streamUrl);
       const resource = createAudioResource(stream, {
-        inputType: isHLS ? StreamType.OggOpus : StreamType.Arbitrary,
-        inlineVolume: !isHLS,  // Volume control not available for OggOpus
+        inputType: isHLS ? StreamType.Raw : StreamType.Arbitrary,
+        inlineVolume: true,
       });
 
       // Set volume to 50% to prevent distortion
@@ -166,10 +189,19 @@ export class MusicPlayerManager {
       // Handle player events
       playerState.player.on(AudioPlayerStatus.Playing, () => {
         console.log(`🎵 Now playing: ${station.name}`);
+        console.log(`🔊 Audio player state: Playing`);
+      });
+
+      playerState.player.on(AudioPlayerStatus.Buffering, () => {
+        console.log(`⏳ Audio player buffering...`);
       });
 
       playerState.player.on(AudioPlayerStatus.Idle, () => {
         console.log(`⏸️  Playback ended for: ${station.name}`);
+      });
+
+      playerState.player.on(AudioPlayerStatus.AutoPaused, () => {
+        console.log(`⚠️ Audio player auto-paused (no subscribers?)`);
       });
 
       playerState.player.on('error', (error) => {
@@ -303,10 +335,11 @@ export class MusicPlayerManager {
       console.log(`📍 FFmpeg path: ${ffmpegPath}`);
       console.log(`🔗 URL: ${url}`);
 
-      // FFmpeg arguments for HLS streaming - output OGG/Opus (Discord native format)
+      // FFmpeg arguments for HLS streaming - output raw PCM s16le
+      // Discord.js voice will encode this to Opus
       const ffmpegArgs = [
-        // Logging - use info level to see more details
-        '-loglevel', 'info',
+        // Logging
+        '-loglevel', 'warning',
         '-hide_banner',
 
         // Input options for network streams
@@ -317,20 +350,18 @@ export class MusicPlayerManager {
         // Input
         '-i', url,
 
-        // Audio processing - encode to Opus (Discord native)
+        // Audio processing - output raw PCM
         '-vn',                                // No video
-        '-c:a', 'libopus',                    // Opus codec
-        '-b:a', '128k',                       // 128kbps audio bitrate
+        '-acodec', 'pcm_s16le',               // Raw PCM signed 16-bit little-endian
         '-ar', '48000',                       // 48kHz sample rate (Discord requirement)
         '-ac', '2',                           // Stereo
-        '-application', 'audio',              // Optimize for audio
 
         // Output format
-        '-f', 'ogg',                          // OGG container
+        '-f', 's16le',                        // Raw PCM format
         'pipe:1'                              // Output to stdout
       ];
 
-      console.log(`📝 FFmpeg args: ${ffmpegArgs.slice(0, 10).join(' ')}...`);
+      console.log(`📝 FFmpeg args: ${ffmpegArgs.join(' ')}`);
 
       const ffmpeg = spawn(ffmpegPath, ffmpegArgs, {
         stdio: ['pipe', 'pipe', 'pipe']
